@@ -1,0 +1,83 @@
+#!/usr/bin/python
+# Filename: run_coverr.py
+#  This code is used to run "FF_coverr.py", 
+#  and fill the results into ROOT files
+#
+import sys,os,traceback
+import numpy as n
+
+##General parameters.
+bnd = '5'
+
+kmin=10
+kmax=10
+Q2_plot_max=1000.0
+
+Gmode = int(sys.argv[1])
+#max=4 for GEn, max=10.0 for GMn
+gmod = 'GEn'
+Q2min=4
+Q2max=4
+if Gmode==2:
+    gmod = 'GMn'
+    Q2min=10
+    Q2max=10
+
+if Gmode==1:
+    gmod = 'GEn'
+    Q2min=10
+    Q2max=10
+
+#t0mode = int(sys.argv[2])
+t0mode = 1
+if t0mode==1:
+    mod = 't0zero'
+if t0mode==2:
+    mod = 't0opt'
+if t0mode==3:
+    mod = 't0fix'
+if t0mode==4:
+    mod = 't0fix7'
+if t0mode==5:
+    mod = 't0fix4'
+
+fitmode= int(sys.argv[2])
+#fitmode= 1
+
+#Q2max=1000
+Q2max=1
+#Q2max=int(sys.argv[4])
+Q2min = Q2max
+
+#Q2min=1
+#Q2max=1
+for Q2 in range(Q2min, Q2max+1):
+    for k in range(kmin, kmax+1):
+        folder = 'jun14_world_norm_bound5/z'+str(k) # folder containing central fits
+
+        fitdata = 'jun14_world'
+        if fitmode ==1:
+            input_file=folder+'/'+fitdata+'_sumrules_leastsq_Q2'+str(Q2)+'_z'+str(k)+'_gb'+bnd+'_'+mod+'_'+gmod+'.dat'
+        if fitmode ==2:
+            input_file=folder+'/'+fitdata+'_sumrules_leastsq_Q2'+str(Q2)+'_z'+str(k)+'_gb'+bnd+'_'+mod+'_'+gmod+'_noHQ.dat'
+        if fitmode ==3:
+            input_file=folder+'/'+fitdata+'_sumrules_leastsq_Q2'+str(Q2)+'_z'+str(k)+'_gb'+bnd+'_'+mod+'_'+gmod+'_noRad.dat'
+ 
+        #output_file = input_file.replace('/jun14_world_','/Round6_world_')
+        output_file = input_file.replace('/jun14_world_','/out_world_')
+        output_file = output_file.replace('jun14_world_norm_','jun14_world_norm_')
+
+        #if os.path.isfile(output_file):
+        if 0:
+            print '--- file has been created: %s, skipped!'%input_file
+            os.system('python neut_FF_sumrules_coverr.py %f %s %s'%(Q2_plot_max, input_file, output_file))
+        #if os.path.isfile(output_file):
+        elif os.path.isfile(input_file):
+            print '--- Reading file = ', input_file
+            print '--- Output to file = ', output_file
+            
+            os.system('python neut_FF_sumrules_coverr.py %f %s %s'%(Q2_plot_max, input_file, output_file))
+        else:
+            print '--- file can not be found: %s, skipped!'%input_file
+  
+print '--- All done!!!'

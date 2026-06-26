@@ -1,0 +1,97 @@
+#!/bin/bash 
+# Proper header for a Bash script.
+
+# Run as root, of course.
+# Insert code here to print error message and exit if not root.
+
+# Set variables.
+fittype="z"
+# fitdata="jun14_world"
+fitdata="Apr2026_world"
+bound=5
+folder=""
+
+#### kmax loop
+kmaxmin=11
+kmaxmax=11
+
+gopt=$1 #1->GEn, 2->GMn
+Q2_Max=4
+gmod="_GEn"
+if [ $gopt -eq 1 ]
+then
+    Q2_Max=10 #max=4 for GEn, =10 for GMn
+    gmod="_GEn"
+fi
+
+if [ $gopt -eq 2 ]
+then
+        Q2_Max=10 #max=4 for GEn, =10 for GMn
+        gmod="_GMn"
+fi
+
+Q2_Max=1000
+#Q2_Max=$2
+
+##method-1:read the fitting parameters from previous fit
+##method-2:read the fitting parameters from t0opt fit for t0zero fit
+##method-3:read the fitting parameters from bound-fit for unbound-fit
+method=1 
+
+#fopt=$2 #1->t0zero, 2->t0opt, 3->t0opt50, 4->t0opt10
+# fopt=1
+fopt=4 
+fmod="_t0zero"
+if [ $fopt -eq 1 ]
+then
+    fmod="_t0zero"
+    method=1 
+fi
+if [ $fopt -eq 2 ]
+then
+    fmod="_t0opt"
+    method=1
+fi
+
+if [ $fopt -eq 3 ]
+then
+    fmod="_t0fix"
+    method=1
+fi
+
+if [ $fopt -eq 4 ]
+then
+    fmod="_t0fix7"
+    method=1
+fi
+
+if [ $fopt -eq 5 ]
+then
+    fmod="_t0fix4"
+    method=1
+fi
+
+for((Q2max=Q2_Max;Q2max<=Q2_Max;Q2max++))
+do
+    for((kmax=kmaxmin; kmax <= kmaxmax ; kmax++)) 
+    do
+        echo '******* Q2max = '${Q2max}', kmax = '${kmax}
+        folder=$fitdata"_norm_bound"$bound"/z"$kmax"/"
+        if ! [ -d $folder ]; then 
+            echo 'Creating folder= '$folder
+            mkdir -p "$folder"
+        fi
+        Q2str=${Q2max}
+        outfile=$folder$fitdata"_sumrules_leastsq_Q2"$Q2str"_"$fittype$kmax"_gb"$bound$fmod$gmod".dat" 
+        #outfile=$folder$fitdata"_sumrules_leastsq_Q2"$Q2str"_"$fittype$kmax"_gb"$bound$fmod$gmod"_noHQ.dat" 
+        # outfile=$folder$fitdata"_sumrules_leastsq_Q2"$Q2str"_"$fittype$kmax"_gb"$bound$fmod$gmod"_noRad.dat" 
+        python3 neut_FF_sumrules_leastsq.py $Q2max $kmax $gopt $fmod $bound $outfile $method
+        echo $outfile' has been created, move on!'
+    done
+done
+let kmax=$kmax-1
+echo "Finished fitdata:"$fitdata "fittype:"$fittype "kmax:"$kmax "bound:"$bound "fmod:" $fmod"  FF: "$gmod
+
+exit #  The right and proper method of "exiting" from a script.
+     #  A bare "exit" (no parameter) returns the exit status
+     #+ of the preceding command. 

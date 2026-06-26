@@ -1,0 +1,148 @@
+######## 
+### FF_sumrules_coverr.py
+### Produces errors on form factors with sum rules at fixed Q^2 points.
+### Accepts five arguments from command line:
+### 1. Q2max points for fitting data, separated by commas.
+### 2 .dat filename of completed fit.
+### 3. Filename for output.
+########
+
+import sys # for user options from command line
+from math import *
+import numpy as np
+from numpy import array, dot
+
+########################
+### CONSTANTS
+########################
+pi = 3.14159265358
+alpha = 7.29735e-3 # Fine-structure constant.
+me = 5.10999e-4 # Mass of the electron in GeV.
+Mp = 0.938272 # Mass of the proton in GeV.
+mpi = 0.13957 # Mass of the charged pion in GeV.
+GE0 = 0. # G_E(0), value of the Sachs electric form factor at q^2 = 0, which for the proton is 1.
+GM0 = -1.91304272 # G_M(0), value of the Sachs magnetic form factor at q^2 = 0, which for the proton is the magnetic moment.
+Lambda2 = 0.71 # Best fit value for parameter in dipole functional form.
+GeVfm = 0.197327 # GeV^(-1) to fm conversion: 1 GeV^(-1) = 0.197327 fm.
+barn = 0.389379338e-3 # 1 GeV^(-2)=0.389e-3 barn.
+########################
+
+# Input.
+Q2max = float(sys.argv[1])
+fitdata = open(sys.argv[2], 'r').readlines()
+outfile = sys.argv[3]
+
+# Q2int = 0.3
+# Q2step = 0.0005
+# Q2 = [Q2step*i for i in range(0,int(Q2int/Q2step)+1)]
+
+# Q2fix=10
+# Q2step = 0.05
+# Q2 = Q2+[Q2int+Q2step*i for i in range(int((Q2fix-Q2int)/Q2step)+2)]
+
+# Q2fix2=100
+# Q2step = 1.
+# Q2 = Q2+[Q2fix+Q2step*i for i in range(int((Q2fix2-Q2fix)/Q2step)+2)]
+
+# Q2step = 10.
+# Q2 = Q2+[Q2fix2+Q2step*i for i in range(int((Q2max-Q2fix2)/Q2step)+2)]
+
+logQ2min = -6.0 #1e-6
+logQ2max = 4.0  #1e4
+logQ2step = 0.005
+logN = int((logQ2max-logQ2min)/logQ2step)
+Q2 = np.zeros(logN, dtype=float)
+for i in range(logN):
+   logQ2 = logQ2min + i*logQ2step
+   Q2[i] = 10.0**logQ2
+
+
+# extract chi2 values
+[ndof,nmax_tmp,numGN,kGN, kNorm] = [float(fitdata[1].split()[i]) for i in range(0,5)]
+[redchi2, chi2, chi2Ngn, chi2gncoef, chi2gnfake, chi2rad] = [float(fitdata[2].split()[i]) for i in range(0,6)]
+
+
+# Extract relevant fit data.
+[Q2max, tcut, t0] = [float(fitdata[0].split()[i]) for i in range(0,3)]
+gncoef_fit = [float(x) for x in fitdata[3].lstrip('[').rstrip(']\n').split(',')]
+
+#gncoef_fit = np.around(gncoef_fit, decimals=6)
+
+kmax = len(gncoef_fit)-1
+nmax = kmax-4
+
+# Kinematic quantities.
+z0 = (1-sqrt(1-t0/tcut))/(1+sqrt(1-t0/tcut))
+zQ2 = [(sqrt(tcut+T)-sqrt(tcut-t0))/(sqrt(tcut+T)+sqrt(tcut-t0)) for T in Q2]
+
+#Extract radius and error:
+[rad2, drad2] = [float(fitdata[4].split()[i]) for i in range(0,2)]
+
+if np.isinf(rad2):
+    rad2 = 0.0
+if np.isinf(drad2):
+    drad2 = 0.0
+
+print "rad2=%f / %f"%(rad2, drad2)
+
+# Covariance matrix.
+cov = []
+for k in range(nmax):
+    covrow = [float(x) for x in fitdata[5+k].lstrip('[').rstrip(']\n').split(',')]
+    cov.append(covrow)
+
+# for k in range(nmax):
+        # for l in range(nmax):
+            # cov[k][l] = cov[k][l]/redchi2
+
+# Sum rules.
+temp = fitdata[5+nmax].replace('[','').replace(']]\n','').split('],')
+sumrules = []
+for k in range(5):
+    sumrules.append([float(x) for x in temp[k].split(',')])
+    
+# FF values and errors.
+GnQ2 = []
+dGnQ2 = []
+for z in zQ2:
+    GnQ2.append(array([gncoef_fit[i]*z**i for i in range(len(gncoef_fit))]).sum())
+    dGn = 0
+    sr = array([ array([sumrules[0][l+1]*array([k-j for j in range(l)]).prod() for l in range(0,4)]).sum() + array([z**(kmax-n)*(sumrules[4-n][0]*z0**k + array([sumrules[4-n][l+1]*array([k-j for j in range(l)]).prod() for l in range(0,4)]).sum()) for n in reversed(range(0,4))]).sum() for k in range(1,nmax+1)])
+    for k in range(nmax):
+        for l in range(nmax):
+            dGn += cov[k][l]*(z**(k+1)- sumrules[0][0]*z0**(k+1) - sr[k])*(z**(l+1)- sumrules[0][0]*z0**(l+1) - sr[l])
+    dGn = sqrt(dGn)
+    dGnQ2.append(dGn)
+GnQ2 = array(GnQ2)
+dGnQ2 = array(dGnQ2)
+
+# Standard dipole form factors and form factor ratios.
+Gdip = array([1/(1+T/Lambda2)**2 for T in Q2])
+
+# Write output.
+of = open(outfile, 'w')    
+print >> of, '##%12s %14s %18s %18s %18s'%('Q2','z','GE(M)n', 'dGE(M)n', 'GDip')
+for i in range(len(Q2)):
+    print >> of, '%14.8e %14.8e %18.10e %18.10e %18.10e'%(Q2[i], zQ2[i], GnQ2[i], dGnQ2[i], Gdip[i])
+
+print >> of, ''
+print >> of, '####### Initial conditions and fitting results'
+print >> of, '## 1: Q2max, tcut, t0, z0'
+print >> of, '## 2: GE(M)n z-formula parameters'
+print >> of, '## 3: redchi2, chi2, chi2Ngn, chi2gncoef, ndof, kmax, numGN, kGN, kNorm, chi2gnfake, chi2rad'
+if 'GEn' in outfile: 
+    print >> of, '## 4: r^2, d(r^2)'
+if 'GMn' in outfile: 
+    print >> of, '## 4: r, dr'
+print >> of, Q2max, tcut, t0, z0
+print >> of, '  '.join(map(str,gncoef_fit))
+print >> of,redchi2, chi2, chi2Ngn, chi2gncoef, ndof, kmax, numGN, kGN, kNorm, chi2gnfake, chi2rad
+if 'GEn' in outfile: 
+    print >> of, rad2, drad2 
+if 'GMn' in outfile: 
+    print >> of, sqrt(rad2), sqrt(drad2)
+print >> of, ''
+print >> of, '# 6 x 6 Covariance Matrix'
+print >> of, ('\n'.join(['  '.join(['{:14}'.format(item) for item in row]) 
+          for row in cov]))
+of.close()

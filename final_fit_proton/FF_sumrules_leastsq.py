@@ -1,0 +1,735 @@
+######## 
+### FF_sumrules_leastsq.py
+### Fits elastic ep-scattering data using scipy.optimize.leastsq.
+### Accepts five arguments from command line:
+### 1. Q2max for fitting data.
+### 2. kmax for order of truncation in z expansion.
+### 3. GEbound for bound on parameters of electric form factor.
+### 4. Filename for output of full fit results (NB: overwrite).
+### 5. Filename to append summarized output.
+########
+
+import scipy.optimize # for fitter#{{{
+import os, sys, traceback # for user options from command line
+import time
+from math import *
+from itertools import chain # flatten array of Mainz normalization combinations
+from numpy import append, insert, array, dot
+from numpy.linalg import inv # for computing sum rules
+from scipy.special import spence # for calculating vertex corrections, NB: spence(x) = Li2(1-x), where Li2 is the dilogarithm/Spence function in (14) of 1307.6227 and in (4.14, B9) of PhysRevC.62.054320
+from FF_loaddata import *
+from FF_funcs import *#}}}
+
+########################
+### CONSTANTS#{{{
+########################
+pi = 3.14159265358
+alpha = 7.29735e-3 # Fine-structure constant.
+me = 5.10999e-4 # Mass of the electron in GeV.
+Mp = 0.938272 # Mass of the proton in GeV.
+mpi = 0.13957 # Mass of the charged pion in GeV.
+GE0 = 1. # G_E(0), value of the Sachs electric form factor at q^2 = 0, which for the proton is 1.
+GM0 = 2.792847356 # G_M(0), value of the Sachs magnetic form factor at q^2 = 0, which for the proton is the magnetic moment.
+Lambda2 = 0.71 # Best fit value for parameter in dipole form factor for proton.
+GeVfm = 0.197327 # GeV^(-1) to fm conversion: 1 GeV^(-1) = 0.197327 fm.
+barn = 0.389379338e-3 # 1 GeV^(-2)=0.389e-3 barn.
+
+#proton radius - use John's proposed numbers in 03/30/17
+#rE = 0.845 #fm, 0.84
+rE = 0.8409 #fm, 0.8409, new PDG value Jan 2020
+#rE = 0.879 #fm, 0.84
+#rE = 0.91 ##0.879 #fm, 0.84
+#rE = 0.91 ##0.879 #fm, 0.84
+rad='RE8409'
+drE = 0.0001 #fm
+#rM = 0.820 #fm
+rM = 0.851 #fm
+drM = 0.0001 #fm
+radM='RM851'
+#########################}}}
+
+########################
+### USER OPTIONS#{{{
+########################
+# Q2max
+Q2max = float(sys.argv[1])
+# kmax of fit, nmax is free parameters after 4 sum rules are imposed
+kmax = int(sys.argv[2])
+nmax = kmax-4
+
+# bounds
+GEbound = float(sys.argv[3])
+GMbound = GEbound*GM0
+
+# tcut for z-expansion
+tcut = 4*mpi**2
+t0mod = sys.argv[4]
+if t0mod=='_t0zero':
+    t0 = 0
+if t0mod=='_t0opt':
+    Q2temp = Q2max
+    if Q2max>35:
+        Q2temp = 35.0 ## avoid calculation opt based on fake points
+    t0 = tcut*(1-sqrt(1+Q2temp/tcut))
+if t0mod=='_t0fix':
+    t0 = -0.80
+if t0mod=='_t0fix9':
+    t0 = -0.90
+if t0mod=='_t0fix10':
+    t0 = -1.00
+if t0mod=='_t0fix4':
+    t0 = -0.40
+if t0mod=='_t0fix7':
+    t0 = -0.70
+if t0mod=='_t0fix6':
+    t0 = -0.60
+if t0mod=='_t0fix16':
+    t0 = -1.60
+
+print('#### t0=',t0)
+
+z0 = (1-sqrt(1-t0/tcut))/(1+sqrt(1-t0/tcut))
+
+# option for datasets to fit: 1 world, 2 world+pol, 3 world+Mainz, 4 world+pol+Mainz, default is world, 5 Mainz only.
+csopt = 4#int(sys.argv[3])
+output_file = sys.argv[5]
+print(output_file)
+if 'world' in  output_file:
+    csopt = 2
+elif 'all' in  output_file:
+    csopt = 4
+elif 'Mainz' in  output_file:
+    csopt = 5
+print('--- using csopt=', csopt)
+
+fakeopt = 1 ##add fake points to contrain high-Q2 behavior
+if('_noHQ.dat' in sys.argv[5]):
+    fakeopt = 0
+
+if('_noRad.dat' in sys.argv[5]):
+    rE_opt = 0
+    rM_opt = 0
+else:
+    rE_opt = 1
+    rM_opt = 1
+
+if rE_opt==1:
+    print('---- using rE radius constraint, rE_fixed = %4.3f+/-%4.3f'%(rE, drE)) 
+else:
+    print('---- No rE constraint! ')
+if rM_opt==1:
+    print('---- using rM radius constraint, rM_fixed = %4.3f+/-%4.3f'%(rM, drM)) 
+else:
+    print('---- No rM constraint! ')
+
+# option to apply A1 systematics for Mainz dataset: 1 (2) for min (max) energy cut, 3 (4) for mult (div) A1 syst scale.
+A1opt = 0
+# option for TPE correction: 1 for Feshbach, 2 for none, default is Blunden.
+tpeopt = 0#int(sys.argv[4])
+ex_tpeopt = 1#int(sys.argv[4]) ## add extra TPE correction at Q2>1 by default
+if('_noExtraTPE' in sys.argv[5]):
+    ex_tpeopt=0
+# Correlated systematics for Mainz dataset:
+# option for grouping subsets: 1 for normalizations (34), 2 for spectrometer-Ebeam (18), 3 for spectrometers (3)
+mainzopt = 1
+# Kinematic variable for systematics using lambda function, with input one Mainz data point d, an array of the form [beam energy, Q2, tau, theta, z, cs, dcs, norms, spec].
+kinvar = lambda d : d[3]
+# tol parameter for chi^2 (see scipy.optimize.leastsq definition of ftol)
+tol = 1e-14
+#########################}}}
+
+########################
+### Use matrix of sum rules, srmat, to compute a0, a_{kmax-n}, b0, b_{kmax-n} for n = {0,1,2,3}
+### for a form factor using the z expansion, with given z0 and nmax = kmax - 4.
+### GE0 = GE(Q2=0), parge = [a_1, ..., a_nmax], GM0 = GM(Q2=0), pargm = [b_1, ..., b_nmax].
+#########################{{{
+def applysumrules(srmat, z0, nmax, GE0, parge, GM0, pargm):
+
+    # Compute combinations of parameters for sum rules.
+    vE = [GE0, 0, 0, 0, 0]
+    vM = [GM0, 0, 0, 0, 0]
+    zn0 = z0
+    for i in range(nmax):
+        vE[0] -= parge[i]*zn0
+        vM[0] -= pargm[i]*zn0
+        vE[1] -= parge[i]
+        vM[1] -= pargm[i]
+        vE[2] -= (i+1)*parge[i]
+        vM[2] -= (i+1)*pargm[i]
+        vE[3] -= (i+1)*i*parge[i]
+        vM[3] -= (i+1)*i*pargm[i]
+        vE[4] -= (i+1)*i*(i-1)*parge[i]
+        vM[4] -= (i+1)*i*(i-1)*pargm[i]
+        zn0 = z0*zn0
+
+    # z expansion sum rules: compute a0, a_{kmax-n} for n = {0,1,2,3}.
+    a0 = sum(srmat[0][j]*vE[j] for j in range(len(vE)))
+    b0 = sum(srmat[0][j]*vM[j] for j in range(len(vM)))
+    for i in range(1,len(srmat)):
+        parge = append(parge, sum(srmat[i][j]*vE[j] for j in range(len(vE))))
+        pargm = append(pargm, sum(srmat[i][j]*vM[j] for j in range(len(vM))))
+    
+    return a0, parge, b0, pargm
+#########################}}}
+
+########################
+### Fitting function computing residuals for data points and Gaussian bounds.
+### Assume params = [a_1, ..., a_nmax, b_1, ..., b_nmax, c_1, ..., c_kslope, N_1, ..., N_kMainz, ..., N_(kMainz+kworld)], where
+### a_i are GE coefficients,
+### b_j are GM coefficients,
+### c_k are slope parameters for the correlated systematics of the Mainz data,
+### and N's are normalization parameters for both Mainz and world data.
+#########################{{{
+def fitfuncsumrules(params):
+    # Iteration number and array for residuals.
+    global iter
+    res = []
+
+    # Extract parameters.
+    gecoef = params[0:nmax]
+    gmcoef = params[nmax:2*nmax]
+    csyst = params[2*nmax:2*nmax+kslope]
+    NMainz = params[2*nmax+kslope:2*nmax+kslope+kMainz]
+    Nworld = params[2*nmax+kslope+kMainz:]
+
+    # Apply sum rules.
+    a0, gecoef, b0, gmcoef = applysumrules(srmat, z0, nmax, GE0, gecoef, GM0, gmcoef)
+    
+    # Mainz cross-section residuals.
+    chi2xsMainz = 0.
+    for d in dataMainz:
+        # Calculate model cross-section value.
+        model = redcs(d[1], d[2], d[3], d[4], a0, gecoef, b0, gmcoef)
+        
+        # Multiply cs and dcs by product of relevant normalization parameters.
+        norm = 1
+        for np in d[7]:
+            norm *= NMainz[normMainz.index(np)]
+        datacs = d[5]*norm
+        datacse = d[6]*norm
+        
+        # Apply correlated systematic.
+        if kslope != 0:
+            deltasys = 0
+            x = kinvar(d) # kinematic variable
+            if mainzopt == 1: # normalization combination
+                temp = normcombMainz.index(d[-2]) # index in array of slope parameters
+            elif mainzopt == 2: # spectrometer-Ebeam
+                temp = specEMainz.index([d[-1], d[0]])  # index in array of slope parameters
+            elif mainzopt == 3: # spectrometer
+                temp = d[-1]
+            xlow = xmin[temp]
+            xhi = xmax[temp]
+            if xlow != xhi: # avoid dividing by zero in case only one data point in normalization combination
+                deltasys = csyst[temp]*(x-xlow)/(xhi-xlow)
+            datacs = datacs*(1 + deltasys)
+            datacse = datacse*(1 + deltasys)
+        
+        # Compute residuals and chi^2.
+        err = (datacs - model)/datacse
+        chi2xsMainz += err*err
+        res.append(err)
+
+    # Mainz correlated systematic slope residuals.
+    chi2csyst = 0.
+    for c in csyst:
+        err = c/(0.004)
+        res.append(err)
+        chi2csyst += err*err
+
+    # Mainz normalization residuals.
+    chi2NMainz = 0.
+    for n in NMainz:
+        err = (n-1)/(0.05)
+        res.append(err)
+        chi2NMainz += err*err
+
+    # World cross-section residuals.
+    chi2xsworld = 0.
+    for d in dataworld:
+        # Calculate model cross-section value.
+        model = redcs(d[1], d[2], d[3], d[4], a0, gecoef, b0, gmcoef)
+        
+        # Multiply cs and dcs by normalization parameter.
+        norm = Nworld[normworld.index([d[-2],d[-1]])]
+        datacs = d[5]*norm
+        datacse = d[6]*norm
+        
+        # Compute residuals and cross-section chi^2.
+        err = (datacs - model)/datacse
+        chi2xsworld += err*err
+        res.append(err)
+
+    # World normalization residuals.
+    chi2Nworld = 0.
+    for k in range(len(Nworld)):
+        err = (Nworld[k]-1)/normworld[k][1]
+        res.append(err)
+        chi2Nworld += err*err
+
+    # Polarization ratio residuals.
+    chi2pol = 0.
+    for d in datapol:
+        rat = ffratio(d[0], d[1], GE0, a0, gecoef, GM0, b0, gmcoef)
+        # Compute residuals and polarization chi^2.
+        err = (rat - d[2])/d[3]
+        chi2pol += err*err
+        res.append(err)
+
+    # fake GEp point for radius contraint
+    chi2gefake = 0.
+    for d in datafake:
+        gep = getff(d[0], d[1], a0, gecoef);
+        # Compute residuals and fake chi^2.
+        err= (gep - d[2])/d[3]
+        chi2gefake += err*err
+        res.append(err)
+
+    # fake GMp point for radius contraint
+    chi2gmfake = 0.
+    for d in datafake:
+        gmp = getff(d[0], d[1], b0, gmcoef);
+        # Compute residuals and fake chi^2.
+        err= (gmp - d[4])/d[5]
+        chi2gmfake += err*err
+        res.append(err)
+
+   # fake GEp point for high-Q2 contraint
+    chi2gefakeHQ = 0.
+    for d in datafakeHQ:
+        gep = getff(d[0], d[1], a0, gecoef);
+        # Compute residuals and fake chi^2.
+        err= (gep - d[2])/d[3]
+        chi2gefakeHQ += err*err
+        res.append(err)
+
+    # fake GMp point for high-Q2 contraint
+    chi2gmfakeHQ = 0.
+    for d in datafakeHQ:
+        gmp = getff(d[0], d[1], b0, gmcoef);
+        # Compute residuals and fake chi^2.
+        err= (gmp - d[4])/d[5]
+        chi2gmfakeHQ += err*err
+        res.append(err)
+
+    # SBS muGE/GM ratio residuals
+    chi2SBS = 0.
+    for d in dataSBS:
+        sbsrat = ffratio(d[0], d[1], GE0, a0, gecoef, GM0, b0, gmcoef)
+        # Compute residuals and SBS chi^2.
+        err = (sbsrat - d[2]) / d[3]
+        chi2SBS += err*err
+        res.append(err)
+
+    # Form factor coefficient residuals for [a1, ... anmax], [b1, ... bnmax].
+    chi2gecoef = 0.
+    chi2gmcoef = 0.
+    for a in gecoef[0:kmax]:#[0:nmax]:
+        err = a/GEbound
+        res.append(err)
+        chi2gecoef += err*err
+    for b in gmcoef[0:kmax]:#[0:nmax]:
+        err = b/GMbound
+        res.append(err)
+        chi2gmcoef += err*err
+
+    chi2erad = 0.
+    gecoef = list(gecoef)
+    erad = zrad(t0, tcut, GE0, gecoef)
+    err = (erad - rE)/drE
+    if rE_opt==1:
+        res.append(err)
+        chi2erad+= err*err
+
+    chi2mrad = 0.
+    gmcoef = list(gmcoef)
+    mrad = zrad(t0, tcut, GM0, gmcoef)
+    err = (mrad - rM)/drM
+    if rM_opt==1:
+        res.append(err)
+        chi2mrad+= err*err
+
+    # Print fit update every 50 calls.
+    if iter %500 == 0:
+        print(iter, chi2xsMainz+chi2csyst+chi2NMainz+chi2xsworld+chi2Nworld+chi2pol+chi2gefake+chi2gmfake+chi2gefakeHQ+chi2gmfakeHQ+chi2SBS+chi2gecoef+chi2gmcoef)
+        print(chi2xsMainz, chi2xsworld, chi2pol, chi2gefake, chi2gmfake, chi2gefakeHQ, chi2gmfakeHQ, chi2SBS)
+        print(chi2gecoef, a0, gecoef)
+        print(chi2gmcoef, b0, gmcoef)
+        print(chi2csyst, csyst)
+        print(chi2NMainz, NMainz)
+        print(chi2Nworld, Nworld)
+        print(chi2erad, chi2mrad)
+    iter += 1
+    
+    return res
+#########################}}}
+
+########################
+### EXECUTION
+########################
+
+########################
+### EXTRACT DATA
+#########################{{{
+# Extract Mainz fit data.
+if csopt == 3 or csopt == 4 or csopt == 5:
+    dataMainz, normcombMainz, specEMainz = loadMainz(Q2max, t0, tcut, A1opt, tpeopt)
+    # Extract sorted list of unique normalization parameters from list of normalization combinations.
+    normMainz = list(chain.from_iterable(normcombMainz))
+    normMainz = sorted(set(normMainz))
+    numMainz, kMainz = len(dataMainz), len(normMainz)
+    # Flatten specEMainz list.
+    specEMainz = list(chain.from_iterable(specEMainz))
+else:
+    dataMainz, normcombMainz, specEMainz = [], [], []
+    normMainz = []
+    numMainz, kMainz = 0, 0
+print("Loaded", numMainz, "Mainz data points,", kMainz, "normalization parameters")
+print("Mainz dataset normalization parameters in fit:", normMainz)
+print("Mainz dataset normalization combinations in fit:", normcombMainz)
+
+# Create arrays of maximum and minimum ranges for correlated systematics (mainzopt = 1, 2, 3).
+mainzen = [0.18, 0.315, 0.45, 0.585, 0.72, 0.855] # list of Mainz beam energies in GeV
+if mainzopt == 1: # normalization combinations    
+    kslope = len(normcombMainz)
+elif mainzopt == 2: # 18 spectrometer-Ebeam settings
+    kslope = len(specEMainz)
+elif mainzopt == 3: # 3 spectrometers    
+    kslope = 3
+else:
+    kslope = 0
+xmin = [1000000]*kslope
+xmax = [0]*kslope
+# Kinematic variable: use lambda function, with input one data Mainz data point [en, Q2, ta, th, z, cs, dcs, norms, spec].
+if kslope != 0:
+    kinvar = lambda d : d[3]
+    for d in dataMainz:
+        x = kinvar(d)
+        if mainzopt == 1: # by normalization combination
+            temp = normcombMainz.index(d[-2])
+        elif mainzopt == 2: # by spectrometer-Ebeam setting
+            temp = specEMainz.index([d[-1],d[0]])
+        elif mainzopt == 3: # by spectrometer
+            temp = d[-1]
+        if x > xmax[temp]:
+            xmax[temp] = x
+        if x < xmin[temp]:
+            xmin[temp] = x
+
+# Extract world fit data.
+if csopt != 5:
+    dataworld, normworld = loadworld(Q2max, t0, tcut, tpeopt, ex_tpeopt) ## load old data set
+    numworld, kworld = len(dataworld), len(normworld)
+else:
+   dataworld, normworld = [],[]
+   numworld, kworld = 0,0
+print("Loaded", numworld, "world data points,", kworld, "experiments")
+print("World dataset experiments in fit:", normworld)
+
+# Extract polarization fit data.
+if csopt == 2 or csopt == 4:
+    datapol, normpol = loadpol(Q2max, t0, tcut)
+    numpol, kpol = len(datapol), len(normpol)
+else:
+    datapol, normpol = [], []
+    numpol, kpol = 0, 0
+
+print("Loaded", numpol, "polarization data points,", kpol, "experiments")
+print("Polarization dataset experiments:", normpol)
+
+# Extract fake FF data for radius contraint.##Not in use now, directly contraint to the radius
+datafake = []
+numfake = 0
+# if fakeopt == 0:
+    # datafake= loadfake(Q2max, t0, tcut, 1)
+    # numfake = len(datafake)
+    # print datafake
+#print "Loaded", numfake, "fake data points."
+
+# Extract fake high Q2 data.
+if fakeopt == 1:
+    datafakeHQ= loadfakeHQ(Q2max, t0, tcut)
+    #datafakeHQ= loadfakeHQ(1001, t0, tcut) ##force to use fake points
+    numfakeHQ = len(datafakeHQ)
+    print(datafakeHQ)
+else:
+    datafakeHQ = []
+    numfakeHQ = 0
+print("Loaded", numfakeHQ, "fake HQ data points.")
+
+# Extract SBS fit data.
+if csopt == 4:
+    dataSBS = loadSBS(Q2max, t0, tcut)
+    numSBS = len(dataSBS)
+else:
+    dataSBS = []
+    numSBS = 0
+print("Loaded", numSBS, "SBS data points.")
+#}}}
+
+########################
+### PERFORM FIT
+#########################{{{
+# Compute sum rules matrix.
+#srmat = sumrules(z0, nmax) # sum rules matrix
+srmat = inv([[1,z0**(nmax+1),z0**(nmax+2),z0**(nmax+3),z0**(nmax+4)], [1,1,1,1,1], [0,nmax+1,nmax+2,nmax+3,nmax+4], [0,(nmax+1)*nmax,(nmax+2)*(nmax+1),(nmax+3)*(nmax+2),(nmax+4)*(nmax+3)], [0,(nmax+1)*nmax*(nmax-1),(nmax+2)*(nmax+1)*nmax,(nmax+3)*(nmax+2)*(nmax+1),(nmax+4)*(nmax+3)*(nmax+2)]])
+
+# z-exp seed, t0 = 0
+gecoef_init = [-1.04,-0.55] + [0]*(nmax-2)
+gmcoef_init = [-2.3] + [0]*(nmax-1)
+# z-exp seed, t0 = t0opt
+gecoef_init = [-1.5,0.55] + [0]*(nmax-2)
+gmcoef_init = [-3.8,1.32] + [0]*(nmax-2)
+
+method = int(sys.argv[6])
+com= (sys.argv[7])
+#method=2
+#if kmax>=6 and Q2max>1 and method==1:
+if kmax>=6 and Q2max>0 and method==1:
+    ##method-1: read the fitting parameters from previous fit
+    prv_file= sys.argv[5]
+    prv_file = prv_file.replace('%s_'%com, './jul032020_')
+    prv_file = prv_file.replace('%s_'%com, 'jul032020_')
+    if('_noExtraTPE.dat' in prv_file):
+        prv_file = prv_file.replace('_noExtraTPE.dat', '.dat')
+    if('_noRad.dat' in prv_file):
+        prv_file = prv_file.replace('_noRad.dat', '.dat')
+    if('_t0opt' in prv_file):
+        prv_file = prv_file.replace('_t0opt', '_t0fix7')
+    if('_z20_' in prv_file):
+        prv_file = prv_file.replace('_Q21000', '_Q23')
+    if('_noHQ' in prv_file):
+        prv_file = prv_file.replace('_noHQ.dat', '.dat')
+    if('_%s_%s.dat'%(rad,radM) in prv_file):
+        prv_file = prv_file.replace('_%s_%s.dat'%(rad,radM), '.dat')
+
+    print('-- Getting parameters from old_file = ', prv_file)
+    prv_fit= open(prv_file, 'r').readlines()
+    gecoef_temp = [float(x) for x in prv_fit[4].lstrip('[').rstrip(']\n').split(',')]
+    gmcoef_temp = [float(x) for x in prv_fit[5].lstrip('[').rstrip(']\n').split(',')]
+    ##remove the first term which is a0, and add one more term in the last for the new parameter
+    gecoef_init = [gecoef_temp[i] for i in range(1, len(gecoef_temp)-4) ]
+    gmcoef_init = [gmcoef_temp[i] for i in range(1, len(gmcoef_temp)-4) ]
+
+if kmax>6 and Q2max>0 and method==2:
+    ##method-1: read the fitting parameters from previous fit
+    prv_file= sys.argv[5]
+    prv_file = prv_file.replace('_z%d_gb'%(kmax),'_z%d_gb'%(kmax-1))
+    prv_file = prv_file.replace('/z%d/'%(kmax),'/z%d/'%(kmax-1))
+    
+    if os.path.isfile(prv_file):
+        print('-- Getting parameters from old_file = ', prv_file)
+        prv_fit= open(prv_file, 'r').readlines()
+        gecoef_temp = [float(x) for x in prv_fit[4].lstrip('[').rstrip(']\n').split(',')]
+        gmcoef_temp = [float(x) for x in prv_fit[5].lstrip('[').rstrip(']\n').split(',')]
+        ##remove the first term which is a0, and add one more term in the last for the new parameter
+        gecoef_init = [gecoef_temp[i] for i in range(1, len(gecoef_temp)-4) ] + [0.0]*1
+        gmcoef_init = [gmcoef_temp[i] for i in range(1, len(gmcoef_temp)-4) ] + [0.0]*1
+
+if kmax>6 and Q2max>1 and method==3:
+    ##method-1: read the fitting parameters from previous fit
+    prv_file= sys.argv[5]
+    prv_file = prv_file.replace('_z%d_gb'%(kmax),'_z%d_gb'%(kmax+1))
+    prv_file = prv_file.replace('/z%d/'%(kmax),'/z%d/'%(kmax+1))
+
+    if os.path.isfile(prv_file):
+        print('-- Getting parameters from old_file = ', prv_file)
+        prv_fit= open(prv_file, 'r').readlines()
+        gecoef_temp = [float(x) for x in prv_fit[4].lstrip('[').rstrip(']\n').split(',')]
+        gmcoef_temp = [float(x) for x in prv_fit[5].lstrip('[').rstrip(']\n').split(',')]
+        ##remove the first term which is a0, and add one more term in the last for the new parameter
+        gecoef_init = [gecoef_temp[i] for i in range(1, len(gecoef_temp)-4-1) ]
+        gmcoef_init = [gmcoef_temp[i] for i in range(1, len(gmcoef_temp)-4-1) ]
+
+if method ==4:
+    prv_file= sys.argv[5]
+    prv_file = prv_file.replace(t0mod,'_t0zero')
+    
+    if os.path.isfile(prv_file):
+        print('-- Getting parameters from old_file = ', prv_file)
+        prv_fit= open(prv_file, 'r').readlines()
+        gecoef_temp = [float(x) for x in prv_fit[4].lstrip('[').rstrip(']\n').split(',')]
+        gmcoef_temp = [float(x) for x in prv_fit[5].lstrip('[').rstrip(']\n').split(',')]
+        ##remove the first term which is a0, and add one more term in the last for the new parameter
+        gecoef_init = [gecoef_temp[i] for i in range(1, len(gecoef_temp)-4) ]
+        gmcoef_init = [gmcoef_temp[i] for i in range(1, len(gmcoef_temp)-4) ]
+
+if method ==5:
+    prv_file= sys.argv[5]
+    prv_file = prv_file.replace('_all_','_world_')
+    prv_file = prv_file.replace('all_sum','world_sum')
+    
+    if os.path.isfile(prv_file):
+        print('-- Getting parameters from old_file = ', prv_file)
+        prv_fit= open(prv_file, 'r').readlines()
+        gecoef_temp = [float(x) for x in prv_fit[4].lstrip('[').rstrip(']\n').split(',')]
+        gmcoef_temp = [float(x) for x in prv_fit[5].lstrip('[').rstrip(']\n').split(',')]
+        ##remove the first term which is a0, and add one more term in the last for the new parameter
+        gecoef_init = [gecoef_temp[i] for i in range(1, len(gecoef_temp)-4) ]
+        gmcoef_init = [gmcoef_temp[i] for i in range(1, len(gmcoef_temp)-4) ]
+
+
+iter = 0 # number of fit iterations
+start = time.perf_counter() # time for diagnostics
+result, cov, infodict, mesg, ier = scipy.optimize.leastsq(fitfuncsumrules, gecoef_init+gmcoef_init+[0]*kslope+[1]*(kMainz+kworld), full_output=1, ftol=tol) # can set ftol, xtol parameters for tolerance in chi^2 and parameter values
+elapsed = time.perf_counter() - start
+#}}}
+
+########################
+### EXTRACTION AFTER FITTING
+#########################{{{
+# Parameter arrays for fit results.
+gecoef = [] 
+gmcoef = []
+csyst = []
+NMainz = []
+Nworld = []
+
+# Extract form factor coefficients; compute a_0, b_0 and rE, rM.
+for i in range(nmax):
+    gecoef.append(result[i])
+    gmcoef.append(result[nmax+i])
+a0, gecoef, b0, gmcoef = applysumrules(srmat, z0, nmax, GE0, gecoef, GM0, gmcoef)
+gecoef = list(gecoef)
+gmcoef = list(gmcoef)
+erad = zrad(t0, tcut, GE0, gecoef)
+mrad = zrad(t0, tcut, GM0, gmcoef)
+##! erad = polyrad(GE0, gecoef)
+##! mrad = polyrad(GM0, gmcoef) # polyrad: GM0, 1/GM0 for poly, invpoly
+gecoef.insert(0, a0) # [a_0, a_1, ..., a_kmax]
+gmcoef.insert(0, b0) # [b_0, b_1, ..., b_kmax]
+
+# Extract correlated systematic slopes and normalizations.
+for i in range(kslope):
+    csyst.append(result[2*nmax+i]) # [c_1, ..., c_kslope]
+for i in range(kMainz):
+    NMainz.append(result[2*nmax+kslope+i]) # [N_1, ..., N_kMainz]
+for i in range(kworld):
+    Nworld.append(result[2*nmax+kslope+kMainz+i]) # [N_{kMainz+1}, ..., N_{kMainz+kworld}]
+
+# Extract chi-square values.
+istart, iend = 0, numMainz
+chi2xsMainz = (infodict['fvec'][istart:iend]**2).sum()
+istart, iend = iend, iend+kslope
+chi2csyst = (infodict['fvec'][istart:iend]**2).sum()
+istart, iend = iend, iend+kMainz
+chi2NMainz = (infodict['fvec'][istart:iend]**2).sum()
+istart, iend = iend, iend+numworld
+chi2xsworld = (infodict['fvec'][istart:iend]**2).sum()
+istart, iend = iend, iend+kworld
+chi2Nworld = (infodict['fvec'][istart:iend]**2).sum()
+istart, iend = iend, iend+numpol
+chi2pol = (infodict['fvec'][istart:iend]**2).sum()
+istart, iend = iend, iend+numfake
+chi2gefake = (infodict['fvec'][istart:iend]**2).sum()
+istart, iend = iend, iend+numfake
+chi2gmfake = (infodict['fvec'][istart:iend]**2).sum()
+istart, iend = iend, iend+numfakeHQ
+chi2gefakeHQ = (infodict['fvec'][istart:iend]**2).sum()
+istart, iend = iend, iend+numfakeHQ
+chi2gmfakeHQ = (infodict['fvec'][istart:iend]**2).sum()
+istart, iend = iend, iend+numSBS
+chi2SBS = (infodict['fvec'][istart:iend]**2).sum()
+istart, iend = iend, iend+kmax#+nmax
+chi2gecoef = (infodict['fvec'][istart:iend]**2).sum()
+istart, iend = iend, iend+kmax#+nmax
+chi2gmcoef = (infodict['fvec'][istart:iend]**2).sum()
+istart, iend = iend, iend+1
+chi2erad = (infodict['fvec'][istart:iend]**2).sum()
+istart, iend = iend, iend+1
+chi2mrad = (infodict['fvec'][istart:iend]**2).sum()
+chi2 = chi2xsMainz+chi2csyst+chi2NMainz+chi2xsworld+chi2Nworld+chi2pol+chi2gefake+chi2gmfake+chi2gefakeHQ+chi2gmfakeHQ+chi2SBS+chi2gecoef+chi2gmcoef+chi2erad+chi2mrad
+chi2tot = (infodict['fvec'][0:]**2).sum()
+if abs(chi2tot - chi2) > 1e-5:
+    print('WARNING! Total chi^2 mismatch:', chi2tot, chi2)
+#}}}
+
+########################
+### RADIUS ERRORS FROM COVARIANCE MATRIX
+#########################{{{
+# Follow Section 15.6, especially Eq. 15.6.5, of Numerical Recipes applied to <r^2>.
+sr = array([ array([(kmax-n)*z0**(kmax-1-n)*(srmat[4-n][0]*z0**k + array([srmat[4-n][l+1]*array([k-j for j in range(l)]).prod() for l in range(0,4)]).sum() ) for n in reversed(list(range(0,4)))]).sum() for k in range(1,nmax+1)])
+r2lindep = array([k*z0**(k-1) - sr[k-1] for k in range(1,nmax+1)])*(-6)/tcut*sqrt(1-t0/tcut)/(1+sqrt(1-t0/tcut))**2*GeVfm**2
+rE2lindep = r2lindep/GE0
+rM2lindep = r2lindep/GM0
+covE = array([[cov[i][j] for j in range(nmax)] for i in range(nmax)])
+covM = array([[cov[i+nmax][j+nmax] for j in range(nmax)] for i in range(nmax)])
+derad = sqrt(dot(rE2lindep, dot(covE, rE2lindep)))/2/erad
+dmrad = sqrt(dot(rM2lindep, dot(covM, rM2lindep)))/2/mrad#}}}
+
+########################
+### OUTPUT TO SCREEN
+#########################{{{
+# Print fit attributes.
+print('Time for fit:', elapsed)
+print('Number of function calls:', infodict['nfev'])
+print('scipy.optimize fit result:', ier)
+print('scipy.optimize fit message:', mesg)
+
+# Print chi^2 information.
+print('Chi^2 tot:', chi2)
+print('Chi^2 Mainz xsec, world xsec, pol, fakeHQ GE, fakeHQ GM, SBS:', chi2xsMainz, chi2xsworld, chi2pol, chi2gefakeHQ, chi2gmfakeHQ, chi2SBS)
+print('Chi^2 gecoef, gmcoef:', chi2gecoef, chi2gmcoef)
+print('Chi^2 corr syst slopes, norm Mainz, norm world:', chi2csyst, chi2NMainz, chi2Nworld)
+print('Total no. data points:', numMainz+numworld+numpol+numfake+numfakeHQ+numSBS)
+print('No. data points Mainz, world, pol, fake, fakeHQ, SBS:', numMainz, numworld, numpol, numfake, numfakeHQ, numSBS)
+print('Total no. fit parameters:', 2*nmax+kslope+kMainz+kworld)
+print('No. coefs, corr syst slopes, norm Mainz, norm world:', 2*nmax, kslope, kMainz, kworld)
+ndof = len(infodict['fvec'])-2*nmax-kslope-kMainz-kworld
+print('Total degrees of freedom:', ndof)
+redchi2 = chi2/ndof
+print('Reduced chi^2:', redchi2)
+
+# Print coefficients and normalizations.
+print('rE, drE, rM, drM:', erad, derad, mrad, dmrad)
+print('chi2_erad, chi2_mrad', chi2erad, chi2mrad)
+print('a_i:', gecoef)
+print('b_j:', gmcoef)
+print('c_k:', csyst)
+print('N_Mainz:', NMainz)
+print('N_world:', Nworld)
+#}}}
+
+########################
+### OUTPUT TO FILE
+#########################{{{
+of = open(sys.argv[5],"w")
+print(Q2max, tcut, t0, GEbound, GMbound, csopt, A1opt, tpeopt, mainzopt, tol, file=of)
+print(ndof, numMainz+numworld+numpol+numfake+numfakeHQ+numSBS, numMainz, numworld, numpol, numfake, nmax, nmax, kslope, kMainz, kworld, numfakeHQ, numSBS, file=of)
+print(redchi2, chi2, chi2xsMainz, chi2xsworld, chi2pol, chi2gefake, chi2gmfake, chi2gecoef, chi2gmcoef, chi2csyst, chi2NMainz, chi2Nworld, chi2gefakeHQ, chi2gmfakeHQ, chi2SBS, chi2erad, chi2mrad, file=of)
+print(erad, derad, mrad, dmrad, file=of)
+print(gecoef, file=of)
+print(gmcoef, file=of)
+print(csyst, file=of)
+print(NMainz, file=of)
+print(Nworld, file=of)
+
+# Covariance matrix and sum rules
+for i in range(2*nmax):
+    covrow = []
+    for j in range(2*nmax):
+        covrow.append(cov[i][j]) ##! May 23, *redchi2) # need to multiply cov by reduced chi^2 to get true approximation to Hessian
+    print(covrow, file=of)
+print(list(list(srmat[i]) for i in range(len(srmat))), file=of)
+
+# Fit attributes, initializations, normalizations
+print(infodict['nfev'], elapsed, ier, file=of)
+print(gecoef_init, file=of)
+print(gmcoef_init, file=of)
+#print >> of, norms_init
+print(normMainz, file=of)
+print(normcombMainz, file=of)
+print(specEMainz, file=of)
+print(normworld, file=of)
+print(normpol, file=of)
+
+of.close()
+#}}}
+
+########################
+### OUTPUT SUMMARY
+########################
+outtext = output_file.replace('.dat','.txt')
+of = open(outtext,"a")
+print(Q2max, kmax, erad, derad, mrad, dmrad, chi2, ndof, redchi2, file=of)
+of.close()

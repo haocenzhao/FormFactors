@@ -1,0 +1,11 @@
+#python fit_err.py 10
+#python fit_err.py 11
+#python fit_err.py 12
+#python fit_err.py 13
+python fit_err.py 14
+python fit_err.py 15
+python fit_err.py 16
+python fit_err.py 17
+python fit_err.py 18
+python fit_err.py 19
+python fit_err.py 20

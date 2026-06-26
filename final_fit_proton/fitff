@@ -1,0 +1,73 @@
+#!/bin/bash 
+# Proper header for a Bash script.
+
+# Run as root, of course.
+# Insert code here to print error message and exit if not root.
+
+# Set variables.
+fittype="z"
+
+dopt=$1 #1->all, 2->world, 3->mainz
+fitdata="all"
+if [ $dopt -eq 1 ]
+then
+    fitdata="all"
+fi
+if [ $dopt -eq 2 ]
+then
+    fitdata="world"
+fi
+if [ $dopt -eq 3 ]
+then
+    fitdata="Mainz"
+fi
+
+bound=5
+folder=""
+mod='_t0fix7'
+#mod='_t0opt'
+kmax=12
+method=1
+Q2max=1000
+com='Apr2026'
+
+echo
+echo '**************************************************'
+echo '******* Q2max = '${Q2max}', kmax = '${kmax}
+echo '**************************************************'
+folder="./"$com"_"$fitdata"_FF/z"$kmax"/"
+if ! [ -d "$folder" ]; then 
+    echo 'Creating folder= '$folder
+    mkdir -p "$folder"
+fi
+
+Q2str=${Q2max}
+fopt=$2 #1->all, 2->world, 3->mainz
+if [ $fopt -eq 1 ]
+then
+    outfile=$folder$fitdata"_sumrules_leastsq_Q2"$Q2str"_"$fittype$kmax"_gb"$bound""$mod".dat" 
+fi
+if [ $fopt -eq 2 ]
+then
+    outfile=$folder$fitdata"_sumrules_leastsq_Q2"$Q2str"_"$fittype$kmax"_gb"$bound""$mod"_noHQ.dat" 
+fi
+if [ $fopt -eq 3 ]
+then
+    outfile=$folder$fitdata"_sumrules_leastsq_Q2"$Q2str"_"$fittype$kmax"_gb"$bound""$mod"_noRad.dat" 
+fi
+if [ $fopt -eq 4 ]
+then
+    outfile=$folder$fitdata"_sumrules_leastsq_Q2"$Q2str"_"$fittype$kmax"_gb"$bound""$mod"_noExtraTPE.dat" 
+fi
+if [ $fopt -eq 5 ]
+then
+    outfile=$folder$fitdata"_sumrules_leastsq_Q2"$Q2str"_"$fittype$kmax"_gb"$bound""$mod"_RE8409_RM851.dat" 
+fi
+
+python3 FF_sumrules_leastsq.py $Q2max $kmax $bound $mod $outfile $method $com
+
+echo "Finished fitdata:"$fitdata "fittype:"$fittype "kmax:"$kmax "bound:"$bound "mod:"$mod
+
+exit #  The right and proper method of "exiting" from a script.
+     #  A bare "exit" (no parameter) returns the exit status
+     #+ of the preceding command. 
